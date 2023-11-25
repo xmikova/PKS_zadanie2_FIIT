@@ -1,10 +1,12 @@
 import copy
 import math
 import os
+import random
 import socket
 import struct
 import threading
 import time
+import binascii
 
 
 class custom_packet:
@@ -60,15 +62,16 @@ def parse_packet(flag, received_info):  # TODO
         return flag, number_of_fragments, filename
 
     if flag == "data":
-        packet_bytes = b'\x00' + received_info[:3]
-        file = received_info[3:]
+        packet_bytes = b'\x00' + received_info[:7]
+        data = received_info[7:]
 
-        fields = ['I']
+        fields = ['I', 'I']
         parsed_values = unpack_bytes(fields, packet_bytes)
 
         fragment_order = parsed_values[0]
+        crc = parsed_values[1]
 
-        return fragment_order, file
+        return fragment_order, crc, data
 
     if flag == "data_server":
         packet_bytes = received_info[:1] + b'\x00' + received_info[1:]
@@ -97,10 +100,9 @@ def unpack_bytes(fields, packet_bytes):
     return parsed_values
 
 
-def is_fragment_correct(fragment_data):
-    # You need to implement the logic to check if the fragment is correct or corrupted
-    # For simplicity, let's assume all fragments are correct
-    return True
+def is_fragment_correct(crc, data):
+    recalculated_crc = binascii.crc32(data) & 0xFFFFFFFF
+    return recalculated_crc == crc
 
 
 def send_keepalive(client_socket, address):
@@ -145,10 +147,11 @@ def server():
         print("Počiatočné spojenie nadviazané, môže začať komunikácia.")
         server_after_init(server_socket)
 
-    except server_socket.timeout:
-        print("Klient neinicializoval spojenie, uzatváram.")
-        server_socket.close()
-        return
+    except OSError as e:
+        if isinstance(e, socket.timeout):
+            print("No response received within the timeout.")
+        else:
+            print(f"OSError: {e}")
 
 
 def server_after_init(server_socket):
@@ -167,19 +170,20 @@ def server_after_init(server_socket):
                 elif flag == 3:
                     print("Bude sa prijímať správa.")
                     flag, number_of_fragments = parse_packet(flag, received_info)
-                    data_process_server(server_socket, flag, number_of_fragments, "")
+                    data_process_server(server_socket, number_of_fragments, "")
 
                 elif flag == 4:
                     print("Bude sa prijímať súbor.")
                     flag, number_of_fragments, filename = parse_packet(flag, received_info)
-                    data_process_server(server_socket, flag, number_of_fragments, filename)
+                    data_process_server(server_socket, number_of_fragments, filename)
 
         except socket.timeout:
             print("Klient neinicializoval komunikáciu, uzatváram.")
             server_socket.close()
             return
 
-def data_process_server(server_socket, flag, number_of_fragments, file_name):
+
+def data_process_server(server_socket, number_of_fragments, file_name):
     fragments_received = set()
     reconstructed_data = []
     isDone = False
@@ -188,11 +192,10 @@ def data_process_server(server_socket, flag, number_of_fragments, file_name):
         try:
             server_socket.settimeout(60)
             received_info, address = server_socket.recvfrom(1500)
-            fragment_order, fragment_data = parse_packet("data", received_info)
-            #kkt = is_fragment_correct(fragment_data)  # Implement your own logic
-            kkt = True
+            fragment_order, crc, fragment_data = parse_packet("data", received_info)
+            correct_crc = is_fragment_correct(crc, fragment_data)
 
-            if kkt:
+            if correct_crc:
                 fragments_received.add(fragment_order)
                 reconstructed_data.append([fragment_order, fragment_data])
                 ack_packet = custom_packet(flag=5, fragment_order=fragment_order)
@@ -201,8 +204,10 @@ def data_process_server(server_socket, flag, number_of_fragments, file_name):
             else:
                 nack_packet = custom_packet(flag=6, fragment_order=fragment_order)
                 server_socket.sendto(bytes(nack_packet), address)
+                print(f"Received corrupted fragment, requested again: {fragment_order}.")
+
         except socket.timeout:
-            print("Timeout waiting for fragments. Reconstructing data...")
+            print("Timeout čakania za fragmentami.")
 
     received_info, address = server_socket.recvfrom(1500)
     flag = struct.unpack('!B', received_info[:1])[0]
@@ -286,10 +291,19 @@ def client_after_init(client_socket, address):
 
 
 def data_process_client(client_socket, address, msg_type):
+    how_many_wrong = 0
+
     fragment_size = int(input("Zadajte velkost jedneho fragmentu (do 1461 B):"))
 
-    # TODO check na velkost fragmentu od uzivatela
-    # TODO wrong packets
+    while fragment_size > 1461 or fragment_size < 0:
+        print("Nesprávne zadaná veľkosť fragmentu, prosím ešte raz:")
+        fragment_size = int(input("Zadajte velkost jedneho fragmentu (do 1461 B):"))
+
+    choice_wrong = input("Chcete posielat aj zlé packety? (A/N):")
+
+    if choice_wrong == "A":
+        how_many_wrong = int(input("Koľko zlých packetov chcete odoslať?: "))
+
 
     if msg_type == "text":
         message = input("Zadajte telo správy:")
@@ -298,7 +312,7 @@ def data_process_client(client_socket, address, msg_type):
         message_init_packet = custom_packet(flag=3, number_of_fragments=num_of_fragments_message)
         client_socket.sendto(bytes(message_init_packet),address)
         fragments = [i for i in range(num_of_fragments_message)]
-        selective_repeat_arq(client_socket,fragments,fragment_size, address, message, "text")
+        selective_repeat_arq(client_socket,fragments,fragment_size, address, message, "text", how_many_wrong)
     elif msg_type == "file":
         file_path = input("Zadajte cestu k súboru:")
 
@@ -311,19 +325,22 @@ def data_process_client(client_socket, address, msg_type):
                 file_init_packet = custom_packet(flag=4, number_of_fragments=num_of_fragments_file, filename=file_path)
                 client_socket.sendto(bytes(file_init_packet), address)
                 fragments = [i for i in range(num_of_fragments_file)]
-                selective_repeat_arq(client_socket,fragments,fragment_size, address, file_to_be_send, "file")
+                selective_repeat_arq(client_socket,fragments,fragment_size, address, file_to_be_send, "file", how_many_wrong)
 
         except FileNotFoundError:
             print(f"Súbor '{file_path}' sa nenašiel.")
         return
 
 
-def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_data, data_type, corruption_rate=0.1):
+def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_data, data_type, how_many_wrong):
+    incoming_responses = 0
     window_size = min(4, len(fragments))
     start_index = 0
     end_index = start_index + fragment_size
     frags_to_be_send = copy.deepcopy(fragments)
     frags_to_be_acked = copy.deepcopy(fragments)
+
+    wrong_packets = random.sample(fragments, how_many_wrong)
 
     #Prvotne odoslanie n fragmentov z okna
     for i in range(window_size):
@@ -331,29 +348,37 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
             fragment_data = (user_data[start_index:end_index]).encode('utf-8')
         elif data_type == "file":
             fragment_data = (user_data[start_index:end_index])
+
+        if i in wrong_packets:
+            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+            crc = int(crc / 2)
+            wrong_packets.remove(i)
+        else:
+            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+
         start_index = end_index
         end_index = start_index + fragment_size
-        fragment_packet = custom_packet(fragment_order=i, data=fragment_data)
+        fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
+        incoming_responses+=1
         print(f"Sent fragment: {i} with data: {fragment_data}")
         frags_to_be_send.remove(i)
 
-    start_index = window_size * 2 + fragment_size + 1
+    start_index = window_size * fragment_size
     end_index = start_index + fragment_size
 
     while len(frags_to_be_acked) != 0:
         while len(frags_to_be_send) != 0:
             i = frags_to_be_send[0]
             received_info, address = client_socket.recvfrom(1500)
+            incoming_responses -= 1
             flag, fragment_order = parse_packet("data_server", received_info)
-            if fragment_order == frags_to_be_acked[0]:
-                frags_to_be_acked.remove(fragment_order)
-
             start_index, end_index, frags_to_be_send = flag_check(client_socket, flag, fragment_order,address, i,
-                                                                  frags_to_be_send, user_data, start_index,
-                                                                  end_index, fragment_size, data_type)
+                                                                  frags_to_be_send, frags_to_be_acked, user_data, start_index,
+                                                                  end_index, fragment_size, data_type, wrong_packets, incoming_responses)
 
         received_info, address = client_socket.recvfrom(1500)
+        incoming_responses-=1
         flag, fragment_order = parse_packet("data_server", received_info)
         if flag == 5:
             print(f"Received ACK: {fragment_order}")
@@ -362,40 +387,107 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
         elif flag == 6:
             print(f"Received NACK, gonna retransmit: {fragment_order}")
             frags_to_be_send.insert(0, fragment_order)
-            received_info, address = client_socket.recvfrom(1500)
-            flag, fragment_order = parse_packet("data_server", received_info)
-            flag_check(client_socket, flag, fragment_order, address, frags_to_be_send[0], frags_to_be_send, user_data, start_index,
-                       end_index, fragment_size, data_type)
+            if len(frags_to_be_acked) == 1 and frags_to_be_acked[0] == fragment_order:
+                start_index = frags_to_be_send[0] * fragment_size
+                end_index = start_index + fragment_size
+                frags_to_be_acked.remove(fragment_order)
+                if data_type == "text":
+                    fragment_data = (user_data[start_index:end_index]).encode('utf-8')
+                elif data_type == "file":
+                    fragment_data = (user_data[start_index:end_index])
+
+                crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+
+                fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
+                client_socket.sendto(bytes(fragment_packet), address)
+                incoming_responses += 1
+                print(f"Sent fragment: {i} with data: {fragment_data}")
+                frags_to_be_send.remove(i)
+            else:
+                received_info, address = client_socket.recvfrom(1500)
+                incoming_responses -= 1
+                flag, fragment_order = parse_packet("data_server", received_info)
+                start_index = frags_to_be_send[0] * fragment_size
+                end_index = start_index + fragment_size
+                start_index, end_index, frags_to_be_send = flag_check(client_socket, flag, fragment_order, address,
+                                                                      frags_to_be_send[0], frags_to_be_send,
+                                                                      frags_to_be_acked, user_data, start_index,
+                                                                      end_index, fragment_size, data_type, wrong_packets,
+                                                                      incoming_responses)
 
     print("Selective Repeat ARQ completed.")
     final_packet = custom_packet(flag=7)
     client_socket.sendto(bytes(final_packet), address)
 
-def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send, user_data, start_index, end_index, fragment_size, data_type):
+
+def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send, frags_to_be_acked, user_data, start_index,
+               end_index, fragment_size, data_type, wrong_packets, incoming_responses):
     if flag == 5:
         print(f"Received ACK: {fragment_order}")
+        if fragment_order in frags_to_be_acked:
+            frags_to_be_acked.remove(fragment_order)
         if data_type == "text":
             fragment_data = (user_data[start_index:end_index]).encode('utf-8')
         elif data_type == "file":
             fragment_data = (user_data[start_index:end_index])
-        start_index = end_index
-        end_index = start_index + fragment_size
-        fragment_packet = custom_packet(fragment_order=i, data=fragment_data)
+
+        if i in wrong_packets:
+            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+            crc = int(crc / 2)
+            wrong_packets.remove(i)
+        else:
+            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+
+        fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
+        incoming_responses+=1
         print(f"Sent fragment: {i} with data: {fragment_data}")
         frags_to_be_send.remove(i)
+        if len(frags_to_be_send) != 0:
+            start_index = frags_to_be_send[0] * fragment_size
+            end_index = start_index + fragment_size
     elif flag == 6:
         print(f"Received NACK, gonna retransmit: {fragment_order}")
         frags_to_be_send.insert(0, fragment_order)
-        received_info, address = client_socket.recvfrom(1500)
-        flag, fragment_order = parse_packet("data_server", received_info)
-        flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send, user_data, start_index, end_index, fragment_size)
+        if len(frags_to_be_acked) != 0:
+            try:
+                received_info, address = client_socket.recvfrom(1500)
+                incoming_responses -= 1
+                flag, fragment_order = parse_packet("data_server", received_info)
+                if frags_to_be_acked[1] != fragment_order:
+                    frags_to_be_acked.remove(fragment_order)
+            except socket.timeout:
+                if data_type == "text":
+                    fragment_data = (user_data[start_index:end_index]).encode('utf-8')
+                elif data_type == "file":
+                    fragment_data = (user_data[start_index:end_index])
+
+                crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+
+                fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
+                client_socket.sendto(bytes(fragment_packet), address)
+                incoming_responses += 1
+                print(f"Sent fragment: {i} with data: {fragment_data}")
+                print("kkt")
+                frags_to_be_send.remove(i)
+                if len(frags_to_be_send) != 0:
+                    start_index = frags_to_be_send[0] * fragment_size
+                    end_index = start_index + fragment_size
+                return start_index, end_index, frags_to_be_send
+        i = frags_to_be_send[0]
+        start_index = i * fragment_size
+        end_index = start_index + fragment_size
+        start_index, end_index, frags_to_be_send = flag_check(client_socket, flag, fragment_order, address, i,
+                                                              frags_to_be_send, frags_to_be_acked,  user_data,
+                                                              start_index, end_index, fragment_size,  data_type,
+                                                              wrong_packets,incoming_responses)
 
     return start_index, end_index, frags_to_be_send
 
 
 def test():
     return
+
 
 if __name__ == "__main__":
     print("menu:")
