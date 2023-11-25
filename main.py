@@ -8,6 +8,8 @@ import threading
 import time
 import binascii
 
+keepalive_event = threading.Event()
+keepalive_event.set()  # Start with keepalive active
 
 class custom_packet:
     def __init__(self, flag=None, number_of_fragments=None, fragment_order=None, crc=None,
@@ -84,8 +86,6 @@ def parse_packet(flag, received_info):  # TODO
 
         return flag, fragment_order
 
-    return
-
 
 def unpack_bytes(fields, packet_bytes):
     offset = 0
@@ -106,9 +106,9 @@ def is_fragment_correct(crc, data):
 
 
 def send_keepalive(client_socket, address):
-    global keepalive_active
+    global keepalive_event
 
-    while keepalive_active.is_set():
+    while keepalive_event.is_set():
         keepalive_packet = custom_packet(flag=2)
         client_socket.sendto(bytes(keepalive_packet), address)
 
@@ -116,22 +116,23 @@ def send_keepalive(client_socket, address):
             client_socket.settimeout(2)
             received_info, address = client_socket.recvfrom(1500)
         except (socket.timeout, ConnectionResetError):
-            if not keepalive_active.is_set():
+            if not keepalive_event.is_set():
                 return
             print("Žiadna odpoveď servera na keepalive. Spojenie uzavreté.")
-            keepalive_active.clear()
+            keepalive_event.clear()
             return
 
         flag = struct.unpack('!B', received_info[:1])[0]
 
         if flag == 2:
-            print("Prijaté keepalive od servera")
+            pass
         else:
             print("Neočakávaná odpoveď na keepalive. Spojenie uzavreté.")
-            keepalive_active.clear()
+            keepalive_event.clear()
             return
 
         time.sleep(5)
+
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -139,19 +140,26 @@ def server():
     port = input("Zadajte port:")
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server_socket.settimeout(60)
-    try:
-        server_socket.bind(("", int(port)))
-        received_info, address = server_socket.recvfrom(1500)
-        first_init_packet = custom_packet(flag=1)
-        server_socket.sendto(bytes(first_init_packet), address)
-        print("Počiatočné spojenie nadviazané, môže začať komunikácia.")
-        server_after_init(server_socket)
 
-    except OSError as e:
-        if isinstance(e, socket.timeout):
-            print("No response received within the timeout.")
-        else:
-            print(f"OSError: {e}")
+    choice = input("Zadajte možnosť:")
+    if choice == "exit":
+        print("Uzatváram spojenie.")
+        server_socket.close()
+        return
+    elif choice == "pokr":
+        try:
+            server_socket.bind(("", int(port)))
+            received_info, address = server_socket.recvfrom(1500)
+            first_init_packet = custom_packet(flag=1)
+            server_socket.sendto(bytes(first_init_packet), address)
+            print("Počiatočné spojenie nadviazané, môže začať komunikácia.")
+            server_after_init(server_socket)
+
+        except OSError as e:
+            if isinstance(e, socket.timeout):
+                print("No response received within the timeout.")
+            else:
+                print(f"OSError: {e}")
 
 
 def server_after_init(server_socket):
@@ -176,6 +184,11 @@ def server_after_init(server_socket):
                     print("Bude sa prijímať súbor.")
                     flag, number_of_fragments, filename = parse_packet(flag, received_info)
                     data_process_server(server_socket, number_of_fragments, filename)
+
+                elif flag == 7:
+                    print("Klient skončil.")
+                    server_socket.close()
+                    return
 
         except socket.timeout:
             print("Klient neinicializoval komunikáciu, uzatváram.")
@@ -232,7 +245,7 @@ def data_process_server(server_socket, number_of_fragments, file_name):
                 file.write(concatenated_data)
             print(f"File received and saved as: {file_name}")
 
-
+#---------------------------------------------------------------------------
 def client():
     port = input("Zadajte port:")
     ip = input("Zadajte IP adresu:")
@@ -254,40 +267,42 @@ def client():
 
 
 def client_after_init(client_socket, address):
-    global keepalive_active
+    global keepalive_event
+
 
     # Thread pre keepalive
-    keepalive_active = threading.Event()
-    keepalive_active.set()  # Start with keepalive active
-    keepalive_thread = threading.Thread(
-        target=send_keepalive, args=(client_socket, address)
-    )
-
-    choice = int(input("Zadajte možnosť, 3 pre poslanie spravy, 4 pre poslanie suboru"))
+    keepalive_thread = threading.Thread(target=send_keepalive, args=(client_socket, address))
     keepalive_thread.start()
 
-    # Prenos dát
-    try:
-        # Textová správa
+    while True:
+        choice = int(input("Zadajte možnosť, 3 pre poslanie spravy, 4 pre poslanie suboru, 5 pre exit"))
+
         if choice == 3 or choice == 4:
+        # Prenos dát
+            try:
+                # Textová správa
+                    keepalive_event.clear()  # Disable keepalive during data transmission
 
-            keepalive_active.clear()
+                    if choice == 3:
+                        data_process_client(client_socket, address, "text")
 
-            if choice == 3:
-                data_process_client(client_socket, address, "text")
-            # TODO: Continue with data transfer logic
-            elif choice == 4:
-                data_process_client(client_socket, address, "file")
-            # Example: Turn on keepalive after data transfer
-            if choice == 5:  # toto dame ze ak success tak sa znovapusti
-                keepalive_active.set()
+                    elif choice == 4:
+                        data_process_client(client_socket, address, "file")
 
-    except KeyboardInterrupt:
-        print("Exiting...")
-        keepalive_active.set()  # Set the event to allow the keepalive thread to exit
-        keepalive_thread.join()
+            except KeyboardInterrupt:
+                print("Exiting...")
 
-    return
+            finally:
+                keepalive_event.set()  # Enable keepalive again
+                keepalive_thread = threading.Thread(target=send_keepalive, args=(client_socket, address))
+                keepalive_thread.start()
+
+        elif choice == 5:
+            finish_packet = custom_packet(flag=7)
+            client_socket.sendto(bytes(finish_packet), address)
+            keepalive_event.clear()
+            client_socket.close()
+            return
 
 
 def data_process_client(client_socket, address, msg_type):
@@ -329,7 +344,6 @@ def data_process_client(client_socket, address, msg_type):
 
         except FileNotFoundError:
             print(f"Súbor '{file_path}' sa nenašiel.")
-        return
 
 
 def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_data, data_type, how_many_wrong):
@@ -468,7 +482,6 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
                 client_socket.sendto(bytes(fragment_packet), address)
                 incoming_responses += 1
                 print(f"Sent fragment: {i} with data: {fragment_data}")
-                print("kkt")
                 frags_to_be_send.remove(i)
                 if len(frags_to_be_send) != 0:
                     start_index = frags_to_be_send[0] * fragment_size
