@@ -282,7 +282,6 @@ def client():
 def client_after_init(client_socket, address):
     global keepalive_event
 
-
     # Thread pre keepalive
     keepalive_thread = threading.Thread(target=send_keepalive, args=(client_socket, address))
     keepalive_thread.start()
