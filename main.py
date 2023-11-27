@@ -157,7 +157,7 @@ def server():
 
         except OSError as e:
             if isinstance(e, socket.timeout):
-                print("No response received within the timeout.")
+                print("Nebola prijatá žiadna odpoveď v rámci timeoutu.")
             else:
                 print(f"OSError: {e}")
 
@@ -213,11 +213,11 @@ def data_process_server(server_socket, number_of_fragments, file_name):
                 reconstructed_data.append([fragment_order, fragment_data])
                 ack_packet = custom_packet(flag=5, fragment_order=fragment_order)
                 server_socket.sendto(bytes(ack_packet), address)
-                print(f"Received fragment: {fragment_order} with data {fragment_data}")
+                print(f"Prijal sa fragment: {fragment_order}")
             else:
                 nack_packet = custom_packet(flag=6, fragment_order=fragment_order)
                 server_socket.sendto(bytes(nack_packet), address)
-                print(f"Received corrupted fragment, requested again: {fragment_order}.")
+                print(f"Prijal sa chybný fragment, vypýtaný znova: {fragment_order}.")
 
         except socket.timeout:
             print("Timeout čakania za fragmentami.")
@@ -237,13 +237,26 @@ def data_process_server(server_socket, number_of_fragments, file_name):
 
         # Now, you can process the concatenated_data based on the original data type (text or file)
         if file_name == "":  # Text message
-            print(f"Received text message: {concatenated_data.decode('utf-8')}")
+            print(f"Prijala sa textová správa: {concatenated_data.decode('utf-8')}")
+            final_packet = custom_packet(flag=7, fragment_order=fragment_order)
+            server_socket.sendto(bytes(final_packet), address)
 
         else:
-            # Save the reconstructed file data to the specified file_name
-            with open(file_name, 'wb') as file:
+            filename = os.path.basename(file_name)
+
+            # Ask user for file save path
+            save_path = input("Zadaj cestu kam chceš uložiť súbor (stlač Enter pre defaultne uloženie do Downloads): ").strip()
+
+            if not save_path:
+                save_path = os.path.join(os.path.expanduser('~'), 'Downloads')
+
+            # Save the reconstructed file data to the specified file path
+            with open(os.path.join(save_path, filename), 'wb') as file:
                 file.write(concatenated_data)
-            print(f"File received and saved as: {file_name}")
+            print(f"Súbor prijatý a uložený ako: {os.path.join(save_path, filename)}")
+            final_packet = custom_packet(flag=7, fragment_order=fragment_order)
+            server_socket.sendto(bytes(final_packet), address)
+
 
 #---------------------------------------------------------------------------
 def client():
@@ -332,6 +345,7 @@ def data_process_client(client_socket, address, msg_type):
         file_path = input("Zadajte cestu k súboru:")
 
         try:
+            print("Prichádza súbor: ", file_path)
             with open(file_path, 'rb') as file:
                 file_to_be_send = file.read()
                 file_size = len(file_to_be_send)
@@ -374,8 +388,8 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
         end_index = start_index + fragment_size
         fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
-        incoming_responses+=1
-        print(f"Sent fragment: {i} with data: {fragment_data}")
+        incoming_responses += 1
+        print(f"Odoslal sa fragment: {i}")
         frags_to_be_send.remove(i)
 
     start_index = window_size * fragment_size
@@ -384,6 +398,7 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
     while len(frags_to_be_acked) != 0:
         while len(frags_to_be_send) != 0:
             i = frags_to_be_send[0]
+            #TODo pridat timeout
             received_info, address = client_socket.recvfrom(1500)
             incoming_responses -= 1
             flag, fragment_order = parse_packet("data_server", received_info)
@@ -395,11 +410,11 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
         incoming_responses-=1
         flag, fragment_order = parse_packet("data_server", received_info)
         if flag == 5:
-            print(f"Received ACK: {fragment_order}")
+            print(f"Prijaté ACK: {fragment_order}")
             frags_to_be_acked.remove(fragment_order)
 
         elif flag == 6:
-            print(f"Received NACK, gonna retransmit: {fragment_order}")
+            print(f"Prijaté NACK, vykoná sa retransmit: {fragment_order}")
             frags_to_be_send.insert(0, fragment_order)
             if len(frags_to_be_acked) == 1 and frags_to_be_acked[0] == fragment_order:
                 start_index = frags_to_be_send[0] * fragment_size
@@ -415,7 +430,7 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
                 fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
                 client_socket.sendto(bytes(fragment_packet), address)
                 incoming_responses += 1
-                print(f"Sent fragment: {i} with data: {fragment_data}")
+                print(f"Odoslal sa fragment: {i}")
                 frags_to_be_send.remove(i)
             else:
                 received_info, address = client_socket.recvfrom(1500)
@@ -429,15 +444,27 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
                                                                       end_index, fragment_size, data_type, wrong_packets,
                                                                       incoming_responses)
 
-    print("Selective Repeat ARQ completed.")
     final_packet = custom_packet(flag=7)
     client_socket.sendto(bytes(final_packet), address)
+    try:
+        # Set a timeout for receiving the final acknowledgment packet
+        client_socket.settimeout(60)  # Adjust the timeout value as needed
 
+        received_info, address = client_socket.recvfrom(1500)
+        flag = struct.unpack('!B', received_info[:1])[0]
+
+        if flag == 7:
+            print("Prenos dát pomocotu Selective Repeat ARQ hotový.")
+    except socket.timeout:
+        print("Timeout čakania za finálnym ACKom")
+    finally:
+        # Reset the timeout to its default value or as needed
+        client_socket.settimeout(None)
 
 def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send, frags_to_be_acked, user_data, start_index,
                end_index, fragment_size, data_type, wrong_packets, incoming_responses):
     if flag == 5:
-        print(f"Received ACK: {fragment_order}")
+        print(f"Prijatý ACK: {fragment_order}")
         if fragment_order in frags_to_be_acked:
             frags_to_be_acked.remove(fragment_order)
         if data_type == "text":
@@ -455,13 +482,13 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
         fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
         incoming_responses+=1
-        print(f"Sent fragment: {i} with data: {fragment_data}")
+        print(f"Odoslal sa fragment: {i}")
         frags_to_be_send.remove(i)
         if len(frags_to_be_send) != 0:
             start_index = frags_to_be_send[0] * fragment_size
             end_index = start_index + fragment_size
     elif flag == 6:
-        print(f"Received NACK, gonna retransmit: {fragment_order}")
+        print(f"Prijatý NACK, vykoná sa retransmit: {fragment_order}")
         frags_to_be_send.insert(0, fragment_order)
         if len(frags_to_be_acked) != 0:
             try:
@@ -481,7 +508,7 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
                 fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
                 client_socket.sendto(bytes(fragment_packet), address)
                 incoming_responses += 1
-                print(f"Sent fragment: {i} with data: {fragment_data}")
+                print(f"Odoslal sa fragment: {i}")
                 frags_to_be_send.remove(i)
                 if len(frags_to_be_send) != 0:
                     start_index = frags_to_be_send[0] * fragment_size
