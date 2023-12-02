@@ -9,7 +9,7 @@ import time
 import binascii
 
 keepalive_event = threading.Event()
-keepalive_event.set()  # Start with keepalive active
+keepalive_event.set()
 
 class custom_packet:
     def __init__(self, flag=None, number_of_fragments=None, fragment_order=None, crc=None,
@@ -126,17 +126,13 @@ def send_keepalive(client_socket, address):
 
         if flag == 2:
             pass
-        elif flag == 7:
+        elif flag == 9:
             print("Server skončil. Spojenie uzavreté.")
             keepalive_event.clear()
+            client_socket.close()
             return
-        elif flag == 8:
-            print("Server vyžiadal zmenu rolí - zadaj A pre súhlas/N pre nesúhlas a ukončenie spojenia")
-
 
         time.sleep(5)
-
-
 
 # ---------------------------------------------------------------------------------------------------------------------
 def server():
@@ -162,13 +158,17 @@ def server():
 def server_after_init(server_socket, address):
     while True:
         try:
-            choice = int(input("Zadajte možnosť, 3 pre pokračovanie, 4 pre switch, 5 pre exit"))
+            choice = input("exit?")
             server_socket.settimeout(60)
             while True:
-                if choice == 3:
-                    received_info, address = server_socket.recvfrom(1500)
-                    flag = struct.unpack('!B', received_info[:1])[0]
+                received_info, address = server_socket.recvfrom(1500)
+                flag = struct.unpack('!B', received_info[:1])[0]
 
+                if choice == "exit":
+                    exit_packet = custom_packet(flag=9)
+                    server_socket.sendto(bytes(exit_packet), address)
+                    server_socket.close()
+                else:
                     if flag == 2:
                         print("Keepalive odoslané klientovi.")
                         keepalive_packet = custom_packet(flag=2)
@@ -186,18 +186,22 @@ def server_after_init(server_socket, address):
                         data_process_server(server_socket, number_of_fragments, filename)
                         break
 
-                    elif flag == 7:
+                    if flag == 8:
+                        print("Klient si vyžiadal zmenu rolí.")
+                        switch_agreed_packet = custom_packet(flag=8)
+                        choice = input("Súhlasite so zmenou? (A/N): ")
+                        if choice == "A":
+                            print("Aktuálna rola: KLIENT")
+                            server_socket.sendto(bytes(switch_agreed_packet), address)
+                            client_after_init(server_socket,address)
+                            return
+                        elif choice == "N":
+                            print("Aktuálna rola: SERVER")
+
+
+                    elif flag == 9:
                         print("Klient skončil.")
                         server_socket.close()
-                elif choice == 4:
-                    print("kkt")
-                elif choice == 5:
-                    finish_packet = custom_packet(flag=7)
-                    server_socket.sendto(bytes(finish_packet), address)
-                    keepalive_event.clear()
-                    server_socket.close()
-                    return
-
 
         except socket.timeout:
             print("Klient neinicializoval komunikáciu, uzatváram.")
@@ -215,7 +219,7 @@ def data_process_server(server_socket, number_of_fragments, file_name):
             server_socket.settimeout(60)
             received_info, address = server_socket.recvfrom(1500)
             fragment_order, crc, fragment_data = parse_packet("data", received_info)
-            correct_crc = is_fragment_correct(crc, fragment_data)
+            correct_crc = is_fragment_correct(crc, struct.pack('!I', fragment_order) + fragment_data)
 
             if correct_crc:
                 fragments_received.add(fragment_order)
@@ -247,9 +251,6 @@ def data_process_server(server_socket, number_of_fragments, file_name):
         # Now, you can process the concatenated_data based on the original data type (text or file)
         if file_name == "":  # Text message
             print(f"Prijala sa textová správa: {concatenated_data.decode('utf-8')}")
-            final_packet = custom_packet(flag=7, fragment_order=fragment_order)
-            server_socket.sendto(bytes(final_packet), address)
-            return
 
         else:
             filename = os.path.basename(file_name)
@@ -264,10 +265,30 @@ def data_process_server(server_socket, number_of_fragments, file_name):
             with open(os.path.join(save_path, filename), 'wb') as file:
                 file.write(concatenated_data)
             print(f"Súbor prijatý a uložený ako: {os.path.join(save_path, filename)}")
+        choice = input("Chcete pokračovať ako server alebo vykonať switch? (pokr/switch): ")
+        if choice == "pokr":
             final_packet = custom_packet(flag=7, fragment_order=fragment_order)
             server_socket.sendto(bytes(final_packet), address)
-            return
-
+        elif choice == "switch":
+            final_packet = custom_packet(flag=8, fragment_order=fragment_order)
+            server_socket.sendto(bytes(final_packet), address)
+            print("Čaká sa za spätnou väzbou od klienta...")
+            try:
+                received_info, address = server_socket.recvfrom(1500)
+                flag = struct.unpack('!B', received_info[:1])[0]
+                if flag == 8:
+                    print("Aktuálna rola: KLIENT")
+                    client_after_init(server_socket, address)
+                    return
+                else:
+                    print("Aktuálna rola: SERVER")
+                    keepalive_packet = custom_packet(flag=2)
+                    server_socket.sendto(bytes(keepalive_packet), address)
+                    print("Keepalive odoslané klientovi.")
+                    return
+            except socket.timeout:
+                print("Timeout waiting for server's response.")
+                return
 
 #---------------------------------------------------------------------------
 def client():
@@ -291,15 +312,13 @@ def client():
 
 
 def client_after_init(client_socket, address):
-    global keepalive_event
-
+    global keepalive_event, switch
     # Thread pre keepalive
     keepalive_thread = threading.Thread(target=send_keepalive, args=(client_socket, address))
     keepalive_thread.start()
 
     while True:
         choice = int(input("Zadajte možnosť, 3 pre poslanie spravy, 4 pre poslanie suboru, 5 pre switch, 6 pre exit"))
-
         if choice == 3 or choice == 4:
         # Prenos dát
             try:
@@ -321,10 +340,30 @@ def client_after_init(client_socket, address):
                 keepalive_thread.start()
 
         elif choice == 5:
-            return # TODO switch
+            # Switch request
+            switch_packet = custom_packet(flag=8)
+            client_socket.sendto(bytes(switch_packet), address)
+
+            # Wait for the server's response
+            try:
+                received_info, server_address = client_socket.recvfrom(1500)
+                flag = struct.unpack('!B', received_info[:1])[0]
+
+                if flag == 8:
+                    print("Aktuálna rola: SERVER")
+                    keepalive_event.clear()
+                    server_after_init(client_socket,address)
+                    return
+                else:
+                    print("Aktuálna rola: KLIENT")
+                    continue
+
+            except socket.timeout:
+                print("Timeout waiting for server's response.")
+                continue
 
         elif choice == 6:
-            finish_packet = custom_packet(flag=7)
+            finish_packet = custom_packet(flag=9)
             client_socket.sendto(bytes(finish_packet), address)
             keepalive_event.clear()
             client_socket.close()
@@ -391,11 +430,11 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
             fragment_data = (user_data[start_index:end_index])
 
         if i in wrong_packets:
-            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+            crc = binascii.crc32(struct.pack('!I', i) + fragment_data) & 0xFFFFFFFF
             crc = int(crc / 2)
             wrong_packets.remove(i)
         else:
-            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+            crc = binascii.crc32(struct.pack('!I', i) + fragment_data) & 0xFFFFFFFF
 
         start_index = end_index
         end_index = start_index + fragment_size
@@ -460,6 +499,7 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
     final_packet = custom_packet(flag=7)
     client_socket.sendto(bytes(final_packet), address)
     try:
+        print("Čaká sa za spätnou väzbou servera...")
         # Set a timeout for receiving the final acknowledgment packet
         client_socket.settimeout(60)  # Adjust the timeout value as needed
 
@@ -467,7 +507,22 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
         flag = struct.unpack('!B', received_info[:1])[0]
 
         if flag == 7:
-            print("Prenos dát pomocotu Selective Repeat ARQ hotový.")
+            print("Prenos dát pomocou Selective Repeat ARQ hotový.")
+            return
+        elif flag == 8:
+            print("Prenos dát hotový, server si chce vymeniť rolu.")
+            switch_agreed_packet = custom_packet(flag=8)
+            choice = input("Súhlasite so zmenou? (A/N): ")
+            if choice == "A":
+                client_socket.sendto(bytes(switch_agreed_packet), address)
+                print("Aktuálna rola: SERVER")
+                server_after_init(client_socket, address)
+                return
+            elif choice == "N":
+                print("Aktuálna rola: KLIENT")
+                return
+
+
     except socket.timeout:
         print("Timeout čakania za finálnym ACKom")
     finally:
@@ -486,11 +541,11 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
             fragment_data = (user_data[start_index:end_index])
 
         if i in wrong_packets:
-            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+            crc = binascii.crc32(struct.pack('!I', i) + fragment_data) & 0xFFFFFFFF
             crc = int(crc / 2)
             wrong_packets.remove(i)
         else:
-            crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+            crc = binascii.crc32(struct.pack('!I', i) + fragment_data) & 0xFFFFFFFF
 
         fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
@@ -516,7 +571,7 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
                 elif data_type == "file":
                     fragment_data = (user_data[start_index:end_index])
 
-                crc = binascii.crc32(fragment_data) & 0xFFFFFFFF
+                crc = binascii.crc32(struct.pack('!I', i) + fragment_data) & 0xFFFFFFFF
 
                 fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
                 client_socket.sendto(bytes(fragment_packet), address)
@@ -538,9 +593,6 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
     return start_index, end_index, frags_to_be_send
 
 
-def test():
-    return
-
 
 if __name__ == "__main__":
     print("menu:")
@@ -549,5 +601,5 @@ if __name__ == "__main__":
         server()
     elif user_input == "klient":
         client()
-    elif user_input == "test":
-        test()
+    else:
+        exit(0)
