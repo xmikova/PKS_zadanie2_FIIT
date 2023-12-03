@@ -174,7 +174,7 @@ def server():
 def server_after_init(server_socket, address):
     while True:
         try:
-            choice = input("Chcete skončiť? (zadajte exit): ")
+            choice = input("Pre pokračovanie stlačte enter, pre ukončenie zadajte exit): ")
             server_socket.settimeout(60)
             #Prijímajú sa packety a vykonáva sa akcia podľa flagu
             while True:
@@ -282,10 +282,10 @@ def data_process_server(server_socket, number_of_fragments, file_name):
         #Možnosť pre server vykonať switch alebo pokračovať
         choice = input("Chcete pokračovať ako server alebo vykonať switch? (pokr/switch): ")
         if choice == "pokr":
-            final_packet = custom_packet(flag=7, fragment_order=fragment_order)
+            final_packet = custom_packet(flag=7)
             server_socket.sendto(bytes(final_packet), address)
         elif choice == "switch":
-            final_packet = custom_packet(flag=8, fragment_order=fragment_order)
+            final_packet = custom_packet(flag=8)
             server_socket.sendto(bytes(final_packet), address)
             print("Čaká sa za spätnou väzbou od klienta...")
             try:
@@ -413,7 +413,7 @@ def data_process_client(client_socket, address, msg_type):
         message_init_packet = custom_packet(flag=3, number_of_fragments=num_of_fragments_message)
         client_socket.sendto(bytes(message_init_packet),address)
         fragments = [i for i in range(num_of_fragments_message)]
-        print("Ide sa odosielať ", num_of_fragments_message,"fragmentov o veľkosti ",fragment_size,"B")
+        print("Ide sa odosielať ",num_of_fragments_message,"fragmentov o veľkosti ",fragment_size,"B")
         selective_repeat_arq(client_socket,fragments,fragment_size, address, message, "text", how_many_wrong)
     elif msg_type == "file":
         file_path = input("Zadajte cestu k súboru:")
@@ -428,7 +428,7 @@ def data_process_client(client_socket, address, msg_type):
                 file_init_packet = custom_packet(flag=4, number_of_fragments=num_of_fragments_file, filename=file_path)
                 client_socket.sendto(bytes(file_init_packet), address)
                 fragments = [i for i in range(num_of_fragments_file)]
-                print("Ide sa odosielať ", num_of_fragments_file, "fragmentov o veľkosti ", fragment_size, "B")
+                print("Ide sa odosielať ",num_of_fragments_file, "fragmentov o veľkosti ", fragment_size, "B")
                 selective_repeat_arq(client_socket,fragments,fragment_size, address, file_to_be_send, "file", how_many_wrong)
 
         except FileNotFoundError:
