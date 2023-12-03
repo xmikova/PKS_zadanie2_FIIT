@@ -1,3 +1,7 @@
+# Zadanie 2: komunikácia s využitím UDP protokolu
+# PKS - ZS 2023/2024
+# Autor: Petra Miková
+
 import copy
 import math
 import os
@@ -8,9 +12,12 @@ import threading
 import time
 import binascii
 
+#Globálne premenné pre keepalive
 keepalive_event = threading.Event()
 keepalive_event.set()
 
+#Trieda custom_packet, kde si udržiavam všetky časti hlavičky a taktiež obsahuje funkciu, ktorá celý jej content dá do
+#bitovej podoby na posielanie
 class custom_packet:
     def __init__(self, flag=None, number_of_fragments=None, fragment_order=None, crc=None,
                  data=None, filename=None):
@@ -35,9 +42,9 @@ class custom_packet:
 
         return flag_bytes + number_of_fragments_bytes + fragment_order_bytes + crc_bytes + filename_bytes + data_bytes
 
-
+#Funkcia na rozparsovanie bitov priajtého packetu podľa toho, o aký packet ide
 def parse_packet(flag, received_info):
-    if flag == 3:  # textova sprava
+    if flag == 3:  #Textová sprava
         packet_bytes = received_info[:1] + b'\x00' + received_info[1:]
 
         fields = ['B', 'I']
@@ -48,7 +55,7 @@ def parse_packet(flag, received_info):
 
         return flag, number_of_fragments
 
-    elif flag == 4:  # subor
+    elif flag == 4:  #Súbor
         packet_bytes = received_info[:1] + b'\x00' + received_info[1:]
         bytes_length = len(packet_bytes)
         filename_length = bytes_length - 5
@@ -63,7 +70,7 @@ def parse_packet(flag, received_info):
 
         return flag, number_of_fragments, filename
 
-    if flag == "data":
+    if flag == "data": #Packet s dátami
         packet_bytes = b'\x00' + received_info[:7]
         data = received_info[7:]
 
@@ -75,7 +82,7 @@ def parse_packet(flag, received_info):
 
         return fragment_order, crc, data
 
-    if flag == "data_server":
+    if flag == "data_server": #Packet s ACK/NACK od servera
         packet_bytes = received_info[:1] + b'\x00' + received_info[1:]
 
         fields = ['B', 'I']
@@ -86,7 +93,7 @@ def parse_packet(flag, received_info):
 
         return flag, fragment_order
 
-
+#Pomocná funkcia pre funkciu parsovania bytov
 def unpack_bytes(fields, packet_bytes):
     offset = 0
     parsed_values = []
@@ -100,11 +107,12 @@ def unpack_bytes(fields, packet_bytes):
     return parsed_values
 
 
+#Jednoduchý check pre processing dát na server side kde sa kontroluje či je CRC správne
 def is_fragment_correct(crc, data):
     recalculated_crc = binascii.crc32(data) & 0xFFFFFFFF
     return recalculated_crc == crc
 
-
+#Funkcia pre udržiavanie sppojenia pomocou keepalive každých 5 sekúnd využivajúca thread
 def send_keepalive(client_socket, address):
     global keepalive_event
 
@@ -126,19 +134,24 @@ def send_keepalive(client_socket, address):
 
         if flag == 2:
             pass
-        elif flag == 9:
+        elif flag == 9: #Taktiež sa tu handluje ak náhodou server namiesto keepalive odošle packet že explicitne končí
             print("Server skončil. Spojenie uzavreté.")
             keepalive_event.clear()
             client_socket.close()
             return
+        else:
+            print("Neočakávaná odpoveď na keepalive. Spojenie uzavreté.")
+            keepalive_event.clear()
+            return
 
         time.sleep(5)
 
-# ---------------------------------------------------------------------------------------------------------------------
+# --------------------------------------- SERVER SIDE --------------------------------------------------
+#Prvotná funckia pre server kde sa zadá port a establishuje sa spojenie
 def server():
     port = input("Zadajte port:")
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server_socket.settimeout(30)
+    server_socket.settimeout(60)
 
     try:
         server_socket.bind(("", int(port)))
@@ -157,11 +170,13 @@ def server():
             print(f"OSError: {e}")
 
 
+#Sem server pokračuje ak bolo správne nadviazané spojenie
 def server_after_init(server_socket, address):
     while True:
         try:
-            choice = input("exit?")
-            server_socket.settimeout(30)
+            choice = input("Chcete skončiť? (zadajte exit): ")
+            server_socket.settimeout(60)
+            #Prijímajú sa packety a vykonáva sa akcia podľa flagu
             while True:
                 received_info, address = server_socket.recvfrom(1500)
                 flag = struct.unpack('!B', received_info[:1])[0]
@@ -210,7 +225,7 @@ def server_after_init(server_socket, address):
             server_socket.close()
             exit(0)
 
-
+#Funkcia kde sa vykonáva prenos dát na strane servera, prijímajú sa fragmenty a odosiela sa ACK/NACK
 def data_process_server(server_socket, number_of_fragments, file_name):
     fragments_received = set()
     reconstructed_data = []
@@ -218,7 +233,7 @@ def data_process_server(server_socket, number_of_fragments, file_name):
 
     while len(fragments_received) < number_of_fragments:
         try:
-            server_socket.settimeout(30)
+            server_socket.settimeout(60)
             received_info, address = server_socket.recvfrom(1500)
             fragment_order, crc, fragment_data = parse_packet("data", received_info)
             correct_crc = is_fragment_correct(crc, struct.pack('!I', fragment_order) + fragment_data)
@@ -245,30 +260,26 @@ def data_process_server(server_socket, number_of_fragments, file_name):
     if flag == 7:
         isDone = True
 
+    #Ak sa skončil prenos úspešne a máme všetky fragmenty
     if isDone:
-        #  Sort the reconstructed_data based on fragment_order
         sorted_data = sorted(reconstructed_data, key=lambda x: x[0])
-
-        # Concatenate the fragment_data into a byte string
         concatenated_data = b''.join(data[1] for data in sorted_data)
 
-        # Now, you can process the concatenated_data based on the original data type (text or file)
-        if file_name == "":  # Text message
+        if file_name == "":  #Textová správa
             print(f"Prijala sa textová správa: {concatenated_data.decode('utf-8')}")
 
-        else:
+        else: #Súbor
             filename = os.path.basename(file_name)
-
-            # Ask user for file save path
             save_path = input("Zadaj cestu kam chceš uložiť súbor (stlač Enter pre defaultne uloženie do Downloads): ").strip()
 
             if not save_path:
                 save_path = os.path.join(os.path.expanduser('~'), 'Downloads')
 
-            # Save the reconstructed file data to the specified file path
             with open(os.path.join(save_path, filename), 'wb') as file:
                 file.write(concatenated_data)
             print(f"Súbor prijatý a uložený ako: {os.path.join(save_path, filename)}")
+
+        #Možnosť pre server vykonať switch alebo pokračovať
         choice = input("Chcete pokračovať ako server alebo vykonať switch? (pokr/switch): ")
         if choice == "pokr":
             final_packet = custom_packet(flag=7, fragment_order=fragment_order)
@@ -295,7 +306,8 @@ def data_process_server(server_socket, number_of_fragments, file_name):
                 exit(0)
                 return
 
-#---------------------------------------------------------------------------
+# --------------------------------------- CLIENT SIDE --------------------------------------------------
+#Prvotná funckia pre klienta kde sa zadá port a IP a establishuje sa spojenie
 def client():
     port = input("Zadajte port:")
     ip = input("Zadajte IP adresu:")
@@ -312,29 +324,29 @@ def client():
             print("Uspešná inicializácia spojenia na oboch stranách")
             client_after_init(client_socket, address)
         else:
-            print("Nebolo inicializované spojenie, uzatváram")
+            print("Nebolo inicializované spojenie, uzatváram.")
             client_socket.close()
             return
 
-    except Exception as e:
-        print(f"Chyba pri inicializácii klienta: {e}")
-        if 'client_socket' in locals() and client_socket:
-            client_socket.close()
+    except socket.timeout:
+        print("Nebolo inicializované spojenie, uzatváram.")
+        client_socket.close()
 
-
+#Sem klient prechádza po úspešnom spojení a vyberá si z možností odoslať správu/súbor, vykonať switch alebo skončiť
+#Taktiež sa začína keepalive thread
 def client_after_init(client_socket, address):
-    global keepalive_event, switch
-    # Thread pre keepalive
+    global keepalive_event
+
+    #Thread pre keepalive
     keepalive_thread = threading.Thread(target=send_keepalive, args=(client_socket, address))
     keepalive_thread.start()
 
     while True:
         choice = int(input("Zadajte možnosť, 3 pre poslanie spravy, 4 pre poslanie suboru, 5 pre switch, 6 pre exit"))
-        if choice == 3 or choice == 4:
-        # Prenos dát
+        if choice == 3 or choice == 4:  #Prenos dát
             try:
                 # Textová správa
-                    keepalive_event.clear()  # Disable keepalive during data transmission
+                    keepalive_event.clear()  #Počas prenosu dát vypnuté keepalive
 
                     if choice == 3:
                         data_process_client(client_socket, address, "text")
@@ -342,21 +354,18 @@ def client_after_init(client_socket, address):
                     elif choice == 4:
                         data_process_client(client_socket, address, "file")
 
-
             except Exception as e:
                 print(f"Nastala neočakávaná chyba: {e}")
 
-            finally:
-                keepalive_event.set()  # Enable keepalive again
+            finally: #Pustíme po prenose naspäť keepalive
+                keepalive_event.set()
                 keepalive_thread = threading.Thread(target=send_keepalive, args=(client_socket, address))
                 keepalive_thread.start()
 
-        elif choice == 5:
-            # Switch request
+        elif choice == 5:  #Switch
             switch_packet = custom_packet(flag=8)
             client_socket.sendto(bytes(switch_packet), address)
 
-            # Wait for the server's response
             try:
                 received_info, server_address = client_socket.recvfrom(1500)
                 flag = struct.unpack('!B', received_info[:1])[0]
@@ -374,14 +383,14 @@ def client_after_init(client_socket, address):
                 print("Timeout čakania za odpoveďou servera.")
                 continue
 
-        elif choice == 6:
+        elif choice == 6: #Explicitne ukončenie
             finish_packet = custom_packet(flag=9)
             client_socket.sendto(bytes(finish_packet), address)
             keepalive_event.clear()
             client_socket.close()
             return
 
-
+#Funkcia kde sa vypočíta počet fragmentov na odoslanie zo zadanej veľkosti a pošle sa inicializačný packet o prenose dát
 def data_process_client(client_socket, address, msg_type):
     how_many_wrong = 0
 
@@ -404,6 +413,7 @@ def data_process_client(client_socket, address, msg_type):
         message_init_packet = custom_packet(flag=3, number_of_fragments=num_of_fragments_message)
         client_socket.sendto(bytes(message_init_packet),address)
         fragments = [i for i in range(num_of_fragments_message)]
+        print("Ide sa odosielať ", num_of_fragments_message,"fragmentov o veľkosti ",fragment_size,"B")
         selective_repeat_arq(client_socket,fragments,fragment_size, address, message, "text", how_many_wrong)
     elif msg_type == "file":
         file_path = input("Zadajte cestu k súboru:")
@@ -418,14 +428,14 @@ def data_process_client(client_socket, address, msg_type):
                 file_init_packet = custom_packet(flag=4, number_of_fragments=num_of_fragments_file, filename=file_path)
                 client_socket.sendto(bytes(file_init_packet), address)
                 fragments = [i for i in range(num_of_fragments_file)]
+                print("Ide sa odosielať ", num_of_fragments_file, "fragmentov o veľkosti ", fragment_size, "B")
                 selective_repeat_arq(client_socket,fragments,fragment_size, address, file_to_be_send, "file", how_many_wrong)
 
         except FileNotFoundError:
             print(f"Súbor '{file_path}' sa nenašiel.")
 
-
+#Samotný prenos dát pomocou Selective Repeat s veľkosťou okna 4, ktorá sa samozrejme prispôsobí ak máme menej packetov.
 def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_data, data_type, how_many_wrong):
-    incoming_responses = 0
     window_size = min(4, len(fragments))
     start_index = 0
     end_index = start_index + fragment_size
@@ -441,6 +451,7 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
         elif data_type == "file":
             fragment_data = (user_data[start_index:end_index])
 
+        #Ak chceme odoslať chybný fragment modifikujeme CRC
         if i in wrong_packets:
             crc = binascii.crc32(struct.pack('!I', i) + fragment_data) & 0xFFFFFFFF
             crc = int(crc / 2)
@@ -452,32 +463,32 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
         end_index = start_index + fragment_size
         fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
-        incoming_responses += 1
         print(f"Odoslal sa fragment: {i}")
         frags_to_be_send.remove(i)
 
     start_index = window_size * fragment_size
     end_index = start_index + fragment_size
 
+    #Po odoslaní fragmentov z okna sa začína prijatie ACK/NACK pre prvý odoslaný z tohto okna a posúva sa okno
     try:
         client_socket.settimeout(15)
         while len(frags_to_be_acked) != 0:
             try:
                 client_socket.settimeout(15)
+                #Vykonáva sa pokiaľ ešte stále treba odosiealať packety
                 while len(frags_to_be_send) != 0:
                     i = frags_to_be_send[0]
                     received_info, address = client_socket.recvfrom(1500)
-                    incoming_responses -= 1
                     flag, fragment_order = parse_packet("data_server", received_info)
                     start_index, end_index, frags_to_be_send = flag_check(client_socket, flag, fragment_order,address, i,
                                                                           frags_to_be_send, frags_to_be_acked, user_data, start_index,
-                                                                          end_index, fragment_size, data_type, wrong_packets, incoming_responses)
+                                                                          end_index, fragment_size, data_type, wrong_packets)
             except socket.timeout:
                 print("Spojenie sa stratilo.")
                 exit(1)
 
+            #Tu sa už len prijímajú ACK/NACK ak sa poslali všetky packety
             received_info, address = client_socket.recvfrom(1500)
-            incoming_responses-=1
             flag, fragment_order = parse_packet("data_server", received_info)
             if flag == 5:
                 print(f"Prijaté ACK: {fragment_order}")
@@ -499,12 +510,10 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
 
                     fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
                     client_socket.sendto(bytes(fragment_packet), address)
-                    incoming_responses += 1
                     print(f"Odoslal sa fragment: {i}")
                     frags_to_be_send.remove(i)
                 else:
                     received_info, address = client_socket.recvfrom(1500)
-                    incoming_responses -= 1
                     flag, fragment_order = parse_packet("data_server", received_info)
                     start_index = frags_to_be_send[0] * fragment_size
                     end_index = start_index + fragment_size
@@ -512,18 +521,17 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
                                                                           frags_to_be_send[0], frags_to_be_send,
                                                                           frags_to_be_acked, user_data, start_index,
                                                                           end_index, fragment_size, data_type, wrong_packets,
-                                                                          incoming_responses)
+                                                                          )
     except socket.timeout:
         print("Spojenie sa stratilo.")
         exit(1)
 
-
+    #Ukončenie odosielania a čakanie za rozhodnutím servera
     final_packet = custom_packet(flag=7)
     client_socket.sendto(bytes(final_packet), address)
     try:
         print("Čaká sa za spätnou väzbou servera...")
-        client_socket.settimeout(30)  # Adjust the timeout value as needed
-
+        client_socket.settimeout(60)
         received_info, address = client_socket.recvfrom(1500)
         flag = struct.unpack('!B', received_info[:1])[0]
 
@@ -543,15 +551,17 @@ def selective_repeat_arq(client_socket, fragments, fragment_size, address, user_
                 print("Aktuálna rola: KLIENT")
                 return
 
-
     except socket.timeout:
         print("Timeout čakania za finálnym ACKom")
+
     finally:
-        # Reset the timeout to its default value or as needed
         client_socket.settimeout(None)
 
+
+#Funkcia kde sa kontroliuje prijatý packet od servera ako response na odoslané fragmenty, ak sa prijem NACK vykonáva
+#sa retransmission
 def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send, frags_to_be_acked, user_data, start_index,
-               end_index, fragment_size, data_type, wrong_packets, incoming_responses):
+               end_index, fragment_size, data_type, wrong_packets):
     if flag == 5:
         print(f"Prijatý ACK: {fragment_order}")
         if fragment_order in frags_to_be_acked:
@@ -570,7 +580,6 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
 
         fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
         client_socket.sendto(bytes(fragment_packet), address)
-        incoming_responses+=1
         print(f"Odoslal sa fragment: {i}")
         frags_to_be_send.remove(i)
         if len(frags_to_be_send) != 0:
@@ -582,7 +591,6 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
         if len(frags_to_be_acked) != 0:
             try:
                 received_info, address = client_socket.recvfrom(1500)
-                incoming_responses -= 1
                 flag, fragment_order = parse_packet("data_server", received_info)
                 if frags_to_be_acked[1] != fragment_order:
                     frags_to_be_acked.remove(fragment_order)
@@ -596,7 +604,6 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
 
                 fragment_packet = custom_packet(fragment_order=i, crc=crc, data=fragment_data)
                 client_socket.sendto(bytes(fragment_packet), address)
-                incoming_responses += 1
                 print(f"Odoslal sa fragment: {i}")
                 frags_to_be_send.remove(i)
                 if len(frags_to_be_send) != 0:
@@ -609,18 +616,24 @@ def flag_check(client_socket, flag, fragment_order, address, i, frags_to_be_send
         start_index, end_index, frags_to_be_send = flag_check(client_socket, flag, fragment_order, address, i,
                                                               frags_to_be_send, frags_to_be_acked,  user_data,
                                                               start_index, end_index, fragment_size,  data_type,
-                                                              wrong_packets,incoming_responses)
+                                                              wrong_packets)
 
     return start_index, end_index, frags_to_be_send
 
-
-
+#Menu pre užívateľa kde si vyberá či chce byť server/klient
 if __name__ == "__main__":
-    print("menu:")
-    user_input = input("Zadaj server/klient")
+    print("*----------------------------------------------------------------------------*")
+    print("|                  Komunikácia s využitím UDP protokolu                      |")
+    print("|                           Autor: Petra Miková                              |")
+    print("*----------------------------------------------------------------------------*")
+    print("Menu:")
+    user_input = input("Zadajte rolu (server/klient):")
+
+    while user_input not in ["server", "klient"]:
+        print("Nesprávny vstup. Prosím zadajte znova.")
+        user_input = input("Zadajte rolu (server/klient):")
+
     if user_input == "server":
         server()
     elif user_input == "klient":
         client()
-    else:
-        exit(0)
