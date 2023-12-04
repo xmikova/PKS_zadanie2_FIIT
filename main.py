@@ -402,14 +402,17 @@ def data_process_client(client_socket, address, msg_type):
 
     choice_wrong = input("Chcete posielat aj zlé packety? (A/N):")
 
-    if choice_wrong == "A":
-        how_many_wrong = int(input("Koľko zlých packetov chcete odoslať?: "))
-
-
     if msg_type == "text":
         message = input("Zadajte telo správy:")
         message_size = len(message)
         num_of_fragments_message = math.ceil(message_size / fragment_size)
+        if choice_wrong == "A":
+            how_many_wrong = int(input("Koľko zlých packetov chcete odoslať?: "))
+
+        while how_many_wrong < 0 or how_many_wrong > num_of_fragments_message:
+            print("Nesprávny vstup. Prosím zadajte znova.")
+            how_many_wrong = int(input("Koľko zlých packetov chcete odoslať?: "))
+
         message_init_packet = custom_packet(flag=3, number_of_fragments=num_of_fragments_message)
         client_socket.sendto(bytes(message_init_packet),address)
         fragments = [i for i in range(num_of_fragments_message)]
@@ -425,6 +428,12 @@ def data_process_client(client_socket, address, msg_type):
                 file_size = len(file_to_be_send)
                 print("Lokácia súboru: ", os.path.abspath(file_path))
                 num_of_fragments_file = math.ceil(file_size / fragment_size)
+                if choice_wrong == "A":
+                    how_many_wrong = int(input("Koľko zlých packetov chcete odoslať?: "))
+
+                while how_many_wrong < 0 or how_many_wrong > num_of_fragments_file:
+                    print("Nesprávny vstup. Prosím zadajte znova.")
+                    how_many_wrong = int(input("Koľko zlých packetov chcete odoslať?: "))
                 file_init_packet = custom_packet(flag=4, number_of_fragments=num_of_fragments_file, filename=file_path)
                 client_socket.sendto(bytes(file_init_packet), address)
                 fragments = [i for i in range(num_of_fragments_file)]
