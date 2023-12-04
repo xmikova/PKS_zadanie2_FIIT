@@ -230,6 +230,7 @@ def data_process_server(server_socket, number_of_fragments, file_name):
     fragments_received = set()
     reconstructed_data = []
     isDone = False
+    total_size = 0
 
     while len(fragments_received) < number_of_fragments:
         try:
@@ -244,6 +245,7 @@ def data_process_server(server_socket, number_of_fragments, file_name):
                 ack_packet = custom_packet(flag=5, fragment_order=fragment_order)
                 server_socket.sendto(bytes(ack_packet), address)
                 print(f"Prijal sa fragment: {fragment_order}")
+                total_size += math.ceil(len(fragment_data))
             else:
                 nack_packet = custom_packet(flag=6, fragment_order=fragment_order)
                 server_socket.sendto(bytes(nack_packet), address)
@@ -263,7 +265,12 @@ def data_process_server(server_socket, number_of_fragments, file_name):
     #Ak sa skončil prenos úspešne a máme všetky fragmenty
     if isDone:
         sorted_data = sorted(reconstructed_data, key=lambda x: x[0])
+        fragment = sorted_data[0][1]
+        fragment_size = len(fragment.decode('utf-8'))
         concatenated_data = b''.join(data[1] for data in sorted_data)
+        print("Počet priajtých fragmentov: ",number_of_fragments)
+        print("Veľkosť jedného fragmentu: ",fragment_size, "B")
+        print("Celková veľkosť prijatých dát: ",fragment_size * number_of_fragments, "B")
 
         if file_name == "":  #Textová správa
             print(f"Prijala sa textová správa: {concatenated_data.decode('utf-8')}")
@@ -416,7 +423,9 @@ def data_process_client(client_socket, address, msg_type):
         message_init_packet = custom_packet(flag=3, number_of_fragments=num_of_fragments_message)
         client_socket.sendto(bytes(message_init_packet),address)
         fragments = [i for i in range(num_of_fragments_message)]
-        print("Ide sa odosielať ",num_of_fragments_message,"fragmentov o veľkosti ",fragment_size,"B")
+        print("Počet fragmentov na odoslanie: ", num_of_fragments_message)
+        print("Veľkosť jedného fragmentu: ", fragment_size, "B")
+        print("Celková veľkosť odosielaných dát: ", num_of_fragments_message * fragment_size, "B")
         selective_repeat_arq(client_socket,fragments,fragment_size, address, message, "text", how_many_wrong)
     elif msg_type == "file":
         file_path = input("Zadajte cestu k súboru:")
@@ -437,7 +446,9 @@ def data_process_client(client_socket, address, msg_type):
                 file_init_packet = custom_packet(flag=4, number_of_fragments=num_of_fragments_file, filename=file_path)
                 client_socket.sendto(bytes(file_init_packet), address)
                 fragments = [i for i in range(num_of_fragments_file)]
-                print("Ide sa odosielať ",num_of_fragments_file, "fragmentov o veľkosti ", fragment_size, "B")
+                print("Počet fragmentov na odoslanie: ",num_of_fragments_file)
+                print("Veľkosť jedného fragmentu: ", fragment_size, "B")
+                print("Celková veľkosť odosielaných dát: ", num_of_fragments_file * fragment_size, "B")
                 selective_repeat_arq(client_socket,fragments,fragment_size, address, file_to_be_send, "file", how_many_wrong)
 
         except FileNotFoundError:
